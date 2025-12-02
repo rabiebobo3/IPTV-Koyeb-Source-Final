@@ -1,0 +1,7 @@
+{
+    "_readme": [
+        "This file is a dummy file created manually because composer update cannot be run on a phone.",
+        "It is required by the Heroku/Koyeb buildpack to avoid the 'composer.lock not found' error."
+    ],
+    "content-hash": "e810168b4226f74a0e104618e9526e03"
+}
