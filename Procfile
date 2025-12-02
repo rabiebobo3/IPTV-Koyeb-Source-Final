@@ -1,1 +1,1 @@
-web: vendor/bin/heroku-php-apache2 index.php
+web: php -S 0.0.0.0:8080 -t / index.php
