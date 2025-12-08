@@ -1,0 +1,450 @@
+<?php
+// admin.php - الكود النهائي والموحد والمحسن (مظهر احترافي وميزات كاملة)
+
+// تفعيل عرض الأخطاء لسهولة التصحيح
+error_reporting(E_ALL);
+ini_set('display_errors', 1);
+
+session_start();
+require_once 'config.php';
+
+// ********** 1. تحديث هيكل قاعدة البيانات لضمان وجود الأعمدة **********
+try { 
+    $db->exec("ALTER TABLE channels ADD COLUMN category TEXT;");
+    $db->exec("ALTER TABLE channels ADD COLUMN user_agent TEXT;");
+    $db->exec("ALTER TABLE channels ADD COLUMN token TEXT;");
+    $db->exec("ALTER TABLE subscribers ADD COLUMN token TEXT;");
+    $db->exec("ALTER TABLE subscribers ADD COLUMN expiry_date TEXT;");
+    $db->exec("
+        CREATE TABLE IF NOT EXISTS activity_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            timestamp INTEGER NOT NULL,
+            FOREIGN KEY (user_id) REFERENCES subscribers (id)
+        )
+    ");
+} catch (PDOException $e) { /* تجاهل الأخطاء إذا كانت الأعمدة موجودة بالفعل */ }
+// *******************************************************************
+
+// ********** 2. التحقق من تسجيل الدخول **********
+if (!isset($_SESSION['user_id']) || $_SESSION['user_id'] != 1) { 
+    session_destroy();
+    header('Location: index.php');
+    exit();
+}
+
+$error_message = '';
+$success_message = '';
+$action = $_GET['action'] ?? 'dashboard';
+
+function generate_token($length = 32) {
+    return bin2hex(random_bytes($length / 2));
+}
+
+// *** تعريف المتغيرات الافتراضية هنا لتجنب أخطاء Undefined variable ***
+$channels = []; 
+$users = [];    
+$channels_count = 0;
+$users_count = 0;
+$active_users_count = 0; 
+
+
+// ********** 3. معالجة إضافة قناة جديدة **********
+if ($action == 'add_channel' && $_SERVER['REQUEST_METHOD'] == 'POST') {
+    $name = $_POST['name'] ?? '';
+    $url = $_POST['url'] ?? '';
+    $category = $_POST['category'] ?? 'عام';
+    $user_agent = $_POST['user_agent'] ?? 'Mozilla/5.0'; 
+
+    if (!empty($name) && !empty($url)) {
+        try {
+            $stmt = $db->prepare("SELECT COUNT(id) FROM channels WHERE url = ?");
+            $stmt->execute([$url]);
+            if ($stmt->fetchColumn() > 0) {
+                $error_message = 'هذه القناة (الرابط) موجودة بالفعل.';
+            } else {
+                $stmt = $db->prepare("INSERT INTO channels (name, url, category, user_agent, enabled, created_at) VALUES (?, ?, ?, ?, 1, datetime('now'))");
+                $stmt->execute([$name, $url, $category, $user_agent]);
+
+                $success_message = "تمت إضافة القناة '{$name}' بنجاح.";
+                $action = 'channels';
+            }
+        } catch (PDOException $e) {
+            $error_message = 'خطأ في إضافة القناة: ' . $e->getMessage();
+        }
+    } else {
+        $error_message = 'الرجاء إدخال اسم القناة ورابط البث بشكل صحيح.';
+    }
+}
+
+
+// ********** 4. معالجة إضافة مشترك جديد **********
+if ($action == 'add_subscriber' && $_SERVER['REQUEST_METHOD'] == 'POST') {
+    $username = $_POST['username'] ?? '';
+    $duration_days = (int)($_POST['duration_days'] ?? 30);
+
+    if (!empty($username) && $duration_days > 0) {
+        try {
+            $stmt = $db->prepare("SELECT COUNT(id) FROM subscribers WHERE username = ?");
+            $stmt->execute([$username]);
+            if ($stmt->fetchColumn() > 0) {
+                $error_message = 'اسم المستخدم موجود بالفعل. الرجاء اختيار اسم آخر.';
+            } else {
+                $token = generate_token();
+                $expiry_date = date('Y-m-d H:i:s', strtotime("+$duration_days days"));
+
+                $stmt = $db->prepare("INSERT INTO subscribers (username, status, token, created_at, expiry_date) VALUES (?, 'active', ?, datetime('now'), ?)");
+                $stmt->execute([$username, $token, $expiry_date]);
+
+                $success_message = "تمت إضافة المشترك بنجاح ({$duration_days} يوم).";
+                $action = 'subscribers';
+            }
+        } catch (PDOException $e) {
+            $error_message = 'خطأ في إضافة المشترك: ' . $e->getMessage();
+        }
+    } else {
+        $error_message = 'الرجاء إدخال اسم المستخدم ومدة الاشتراك بشكل صحيح.';
+    }
+}
+
+
+// ********** 5. جلب البيانات والإحصائيات **********
+try {
+    $stmt_channels = $db->prepare("SELECT id, name, url, category, enabled, created_at FROM channels ORDER BY id DESC");
+    $stmt_channels->execute();
+    $channels = $stmt_channels->fetchAll(PDO::FETCH_ASSOC);
+    $channels_count = count($channels);
+
+    $stmt_users = $db->prepare("SELECT id, username, status, token, expiry_date, created_at FROM subscribers ORDER BY id DESC");
+    $stmt_users->execute();
+    $users = $stmt_users->fetchAll(PDO::FETCH_ASSOC);
+    $users_count = count($users);
+
+    $active_users_count = $db->query("SELECT COUNT(id) FROM subscribers WHERE status = 'active'")->fetchColumn();
+
+} catch (PDOException $e) {
+    $error_message = 'خطأ في جلب البيانات من قاعدة البيانات: ' . $e->getMessage();
+}
+
+// نهاية PHP. يبدأ كود HTML الاحترافي هنا
+?>
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>لوحة تحكم IPTV</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.3/css/bootstrap.rtl.min.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css">
+    <style>
+        .sidebar { 
+            background-color: #1a202c; /* لون داكن جداً */
+            color: white; 
+            min-height: 100vh; 
+            padding-top: 20px; 
+            box-shadow: 2px 0 5px rgba(0,0,0,0.1);
+        }
+        .sidebar h3 {
+            color: #4299e1; /* لون أزرق مميز */
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+            padding-bottom: 10px;
+            margin-bottom: 20px;
+        }
+        .sidebar a { 
+            color: #ccc; 
+            padding: 12px 15px; 
+            text-decoration: none; 
+            display: block; 
+            border-radius: 4px;
+            margin-bottom: 5px;
+        }
+        .sidebar a:hover { 
+            background-color: #2d3748; 
+            color: white; 
+        }
+        .sidebar .active { 
+            background-color: #4299e1; 
+            color: white; 
+        }
+
+        /* تحسين شكل البطاقات والجداول */
+        .card-text { font-weight: bold; }
+        .bg-primary { background-color: #4299e1 !important; }
+        .bg-success { background-color: #48bb78 !important; }
+        .bg-info { background-color: #ecc94b !important; }
+        .table {
+            background-color: #fff;
+            border-radius: 8px;
+            overflow: hidden;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.05);
+        }
+        .table thead th {
+            background-color: #f7fafc;
+            color: #4a5568;
+            border-bottom: 2px solid #e2e8f0;
+        }
+    </style>
+</head>
+<body>
+
+<div class="d-flex">
+    <div class="sidebar col-md-2">
+        <h3 class="text-center mb-4"><i class="fas fa-cogs"></i> الإدارة</h3>
+        <ul class="nav flex-column">
+            <li class="nav-item">
+                <a class="nav-link <?php echo ($action == 'dashboard') ? 'active' : ''; ?>" href="admin.php?action=dashboard">
+                    <i class="fas fa-tachometer-alt me-2"></i>الرئيسية
+                </a>
+            </li>
+            <li class="nav-item">
+                <a class="nav-link <?php echo ($action == 'channels' || $action == 'add_channel') ? 'active' : ''; ?>" href="admin.php?action=channels">
+                    <i class="fas fa-tv me-2"></i>القنوات (<?php echo $channels_count; ?>)
+                </a>
+            </li>
+            <li class="nav-item">
+                <a class="nav-link <?php echo ($action == 'subscribers' || $action == 'add_subscriber') ? 'active' : ''; ?>" href="admin.php?action=subscribers">
+                    <i class="fas fa-users me-2"></i>المشتركون (<?php echo $users_count; ?>)
+                </a>
+            </li>
+            <li class="nav-item">
+                <a class="nav-link" href="admin.php?action=packages">
+                    <i class="fas fa-box me-2"></i>الحزم/الباقات
+                </a>
+            </li>
+            <li class="nav-item">
+                <a class="nav-link text-danger mt-3" href="logout.php">
+                    <i class="fas fa-sign-out-alt me-2"></i>تسجيل الخروج
+                </a>
+            </li>
+        </ul>
+    </div>
+
+    <div class="content flex-grow-1 p-4">
+        <div class="d-flex justify-content-between align-items-center mb-4">
+            <h1><?php 
+                if ($action == 'dashboard') echo 'لوحة القيادة';
+                else if ($action == 'channels') echo 'إدارة القنوات';
+                else if ($action == 'subscribers') echo 'إدارة المشتركين';
+                else if ($action == 'add_channel') echo 'إضافة قناة جديدة';
+                else if ($action == 'add_subscriber') echo 'إضافة مشترك جديد';
+                else echo 'الإدارة';
+            ?></h1>
+            <?php if ($action == 'channels'): ?>
+                <a href="admin.php?action=add_channel" class="btn btn-primary"><i class="fas fa-plus"></i> إضافة قناة</a>
+            <?php endif; ?>
+
+            <?php if ($action == 'subscribers'): ?>
+                <a href="admin.php?action=add_subscriber" class="btn btn-success"><i class="fas fa-user-plus"></i> إضافة مشترك</a>
+            <?php endif; ?>
+        </div>
+
+        <?php if ($error_message): ?>
+            <div class="alert alert-danger" role="alert"><?php echo $error_message; ?></div>
+        <?php endif; ?>
+        <?php if ($success_message): ?>
+            <div class="alert alert-success" role="alert"><?php echo $success_message; ?></div>
+        <?php endif; ?>
+
+        <?php if ($action == 'dashboard'): ?>
+            <div class="row">
+                <div class="col-md-4">
+                    <div class="card text-white bg-primary mb-3">
+                        <div class="card-body">
+                            <h5 class="card-title">إجمالي القنوات</h5>
+                            <p class="card-text fs-2"><?php echo $channels_count; ?></p>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-md-4">
+                    <div class="card text-white bg-success mb-3">
+                        <div class="card-body">
+                            <h5 class="card-title">إجمالي المشتركين</h5>
+                            <p class="card-text fs-2"><?php echo $users_count; ?></p>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-md-4">
+                    <div class="card text-white bg-info mb-3">
+                        <div class="card-body">
+                            <h5 class="card-title">مشتركون نشطون</h5>
+                            <p class="card-text fs-2"><?php echo $active_users_count; ?></p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        <?php endif; ?>
+
+        <?php if ($action == 'channels' || $action == 'add_channel'): ?>
+            <?php if ($action == 'add_channel'): ?>
+                <div class="card p-4 mb-4">
+                    <h4>إضافة قناة جديدة</h4>
+                    <form action="admin.php?action=add_channel" method="POST">
+                        <div class="row">
+                            <div class="mb-3 col-md-6">
+                                <label for="name" class="form-label">اسم القناة</label>
+                                <input type="text" class="form-control" id="name" name="name" required>
+                            </div>
+                            <div class="mb-3 col-md-6">
+                                <label for="url" class="form-label">رابط البث (URL)</label>
+                                <input type="url" class="form-control" id="url" name="url" required>
+                            </div>
+                        </div>
+                        <div class="row">
+                            <div class="mb-3 col-md-6">
+                                <label for="category" class="form-label">التصنيف</label>
+                                <input type="text" class="form-control" id="category" name="category">
+                            </div>
+                            <div class="mb-3 col-md-6">
+                                <label for="user_agent" class="form-label">User-Agent</label>
+                                <input type="text" class="form-control" id="user_agent" name="user_agent" value="Mozilla/5.0">
+                            </div>
+                        </div>
+                        <button type="submit" class="btn btn-success"><i class="fas fa-save"></i> حفظ القناة</button>
+                        <a href="admin.php?action=channels" class="btn btn-secondary">إلغاء</a>
+                    </form>
+                </div>
+            <?php endif; ?>
+
+            <?php if ($action == 'channels'): ?>
+                <table class="table table-striped table-hover">
+                    <thead>
+                        <tr>
+                            <th>#ID</th>
+                            <th>الاسم</th>
+                            <th>التصنيف</th>
+                            <th>الحالة</th>
+                            <th>الإجراءات</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <?php if (empty($channels)): ?>
+                            <tr><td colspan="5" class="text-center">لا توجد قنوات مضافة حالياً.</td></tr>
+                        <?php else: ?>
+                            <?php foreach ($channels as $channel): ?>
+                            <tr>
+                                <td><?php echo htmlspecialchars($channel['id']); ?></td>
+                                <td><?php echo htmlspecialchars($channel['name']); ?></td>
+                                <td><span class="badge bg-secondary"><?php echo htmlspecialchars($channel['category'] ?? 'عام'); ?></span></td>
+                                <td><?php echo $channel['enabled'] ? '<span class="badge bg-success">مفعل</span>' : '<span class="badge bg-danger">معطل</span>'; ?></td>
+                                <td>
+                                    <a href="#" class="btn btn-sm btn-info"><i class="fas fa-edit"></i> تعديل</a>
+                                    <a href="#" class="btn btn-sm btn-danger"><i class="fas fa-trash"></i> حذف</a>
+                                </td>
+                            </tr>
+                            <?php endforeach; ?>
+                        <?php endif; ?>
+                    </tbody>
+                </table>
+            <?php endif; ?>
+        <?php endif; ?>
+
+        <?php if ($action == 'subscribers' || $action == 'add_subscriber'): ?>
+
+            <?php if ($action == 'add_subscriber'): ?>
+                <div class="card p-4 mb-4">
+                    <h4>نموذج إضافة مشترك</h4>
+                    <form action="admin.php?action=add_subscriber" method="POST">
+                        <div class="mb-3">
+                            <label for="username" class="form-label">اسم المستخدم</label>
+                            <input type="text" class="form-control" id="username" name="username" required>
+                        </div>
+                        <div class="mb-3">
+                            <label for="duration_days" class="form-label">مدة الاشتراك (بالأيام)</label>
+                            <input type="number" class="form-control" id="duration_days" name="duration_days" value="30" min="1" required>
+                            <div class="form-text">سيتم تحديد تاريخ الانتهاء بناءً على هذا العدد من الأيام.</div>
+                        </div>
+                        <button type="submit" class="btn btn-success"><i class="fas fa-save"></i> حفظ المشترك</button>
+                        <a href="admin.php?action=subscribers" class="btn btn-secondary">إلغاء</a>
+                    </form>
+                </div>
+            <?php endif; ?>
+
+            <?php if ($action == 'subscribers'): ?>
+                <table class="table table-striped table-hover">
+                    <thead>
+                        <tr>
+                            <th>#ID</th>
+                            <th>اسم المستخدم</th>
+                            <th>تاريخ الانتهاء</th>
+                            <th>الحالة</th>
+                            <th>رابط M3U</th>
+                            <th>الإجراءات</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <?php 
+                        $host = $_SERVER['HTTP_HOST'];
+                        $now = new DateTime('now');
+                        if (empty($users)): ?>
+                            <tr><td colspan="6" class="text-center">لا يوجد مشتركين مضافين حالياً.</td></tr>
+                        <?php else: ?>
+                            <?php foreach ($users as $subscriber): 
+                                $expiry_date_str = $subscriber['expiry_date'] ?? 'N/A';
+                                $expiry = ($expiry_date_str !== 'N/A') ? new DateTime($expiry_date_str) : null;
+                                $is_expired = ($expiry) ? ($expiry < $now) : false;
+                                $status_badge = $is_expired ? '<span class="badge bg-danger">منتهي</span>' : '<span class="badge bg-success">نشط</span>';
+                                $m3u_link = "http://{$host}/m3u.php?username=" . urlencode($subscriber['username']) . "&password=" . urlencode($subscriber['token']);
+                            ?>
+                            <tr>
+                                <td><?php echo htmlspecialchars($subscriber['id']); ?></td>
+                                <td><?php echo htmlspecialchars($subscriber['username']); ?></td>
+                                <td><?php echo htmlspecialchars($expiry_date_str); ?></td>
+                                <td><?php echo $status_badge; ?></td>
+
+                                <td>
+                                    <button class="btn btn-sm btn-outline-primary copy-btn" data-link="<?php echo htmlspecialchars($m3u_link); ?>" title="انسخ الرابط">
+                                        <i class="fas fa-copy"></i> نسخ
+                                    </button>
+                                </td>
+
+                                <td>
+                                    <a href="#" class="btn btn-sm btn-info"><i class="fas fa-edit"></i> تمديد</a>
+                                    <a href="#" class="btn btn-sm btn-danger"><i class="fas fa-trash"></i> حذف</a>
+                                </td>
+                            </tr>
+                            <?php endforeach; ?>
+                        <?php endif; ?>
+                    </tbody>
+                </table>
+            <?php endif; ?>
+        <?php endif; ?>
+
+        <?php if ($action == 'packages'): ?>
+            <div class="alert alert-warning">
+                هذا القسم مخصص لإدارة الحزم والباقات (Packages).
+            </div>
+        <?php endif; ?>
+
+    </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.3/js/bootstrap.bundle.min.js"></script>
+
+<script>
+    document.addEventListener('DOMContentLoaded', function () {
+        const copyButtons = document.querySelectorAll('.copy-btn');
+        copyButtons.forEach(button => {
+            button.addEventListener('click', function () {
+                const linkToCopy = this.getAttribute('data-link');
+                const tempInput = document.createElement('input');
+                tempInput.value = linkToCopy;
+                document.body.appendChild(tempInput);
+                tempInput.select();
+                document.execCommand('copy');
+                document.body.removeChild(tempInput);
+
+                this.classList.remove('btn-outline-primary');
+                this.classList.add('btn-success');
+                this.innerHTML = '<i class="fas fa-check"></i> تم النسخ';
+
+                setTimeout(() => {
+                    this.classList.remove('btn-success');
+                    this.classList.add('btn-outline-primary');
+                    this.innerHTML = '<i class="fas fa-copy"></i> نسخ';
+                }, 2000);
+            });
+        });
+    });
+</script>
+</body>
+</html>
